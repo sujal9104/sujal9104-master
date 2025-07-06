@@ -1,0 +1,74 @@
+AssertionError in UNION ALL query #5751
+ solved 
+
+
+
+
+
+Your CTE is merging two datasets:
+
+One is an on-the-fly aggregation using SAMPLE BY 10m over trades
+
+The other is a historical pre-aggregated table trades_OHLC_15m
+
+The likely issue:
+In your first SELECT, you're using:
+
+sql
+Copy
+Edit
+first(price) AS open,
+max(price) AS high,
+min(price) AS low,
+last(price) AS close,
+sum(amount) AS volume
+Which means these fields are aggregated and of scalar types (e.g. double, long).
+
+In the second SELECT * FROM trades_OHLC_15m, you likely return:
+
+A full row — with potentially different column order, additional columns, or slightly mismatched types.
+
+Then UNION ALL tries to merge both, and QuestDB hits an internal assertion bug due to incompatible or ambiguous schema resolution.
+
+✅ Recommended Fixes
+1. Explicitly Select and Match Columns in trades_OHLC_15m
+Don't use SELECT *. Instead, align both queries explicitly:
+
+sql
+Copy
+Edit
+WITH historical_and_recent_trades AS (
+  SELECT
+    timestamp, symbol,
+    first(price) AS open,
+    max(price) as high,
+    min(price) as low,
+    last(price) AS close,
+    sum(amount) AS volume
+  FROM trades
+  WHERE timestamp >= dateadd('d', -1, date_trunc('day',now()))
+  SAMPLE BY 10m
+  UNION ALL
+  SELECT
+    timestamp, symbol,
+    open, high, low, close, volume
+  FROM trades_OHLC_15m
+  WHERE timestamp > dateadd('m', -6, date_trunc('month',now()))
+    AND timestamp < dateadd('d', -1, date_trunc('day',now()))
+)
+SELECT open, high
+FROM historical_and_recent_trades
+ORDER BY timestamp DESC;
+This ensures same schema, same order, no wildcard surprises.
+
+⚠️ Known Bug in QuestDB 8.3.3
+This looks like a known internal bug that occurs when QuestDB's planner can't infer matching types cleanly during a UNION with one side being aggregated or sampled. The checkIfSetCastIsRequired() method was responsible for verifying type alignment and failed due to an unhandled edge case.
+
+✅ Solution: Upgrade to a newer QuestDB version (8.4 or later). Several UNION-related bugs were fixed.
+
+📌 Summary
+❌ Avoid SELECT * in UNION ALL
+
+✅ Match column names and types explicitly
+
+⬆️ Upgrade to QuestDB >= 8.4 (if possible)
